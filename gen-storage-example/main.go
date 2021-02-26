@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/google/subcommands"
@@ -33,38 +32,36 @@ func HandleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (ev
 	fmt.Println(event.Body)
 	response = ""
 	var params []string
-	if strings.Contains(event.Body,"Content-Disposition: form-data; name="){
-		split := strings.Split(event.Body,"----------------------------")
+	if strings.Contains(event.Body, "; filename=") {
+		split := strings.Split(event.Body, "----------------------------")
+		if len(split) == 0 {
+			split = strings.Split(event.Body, "------WebKitFormBoundary")
+		}
 		fileName := ""
 		fileContent := ""
 		bucketName := ""
-		for _,val := range split[1:] {
-			if strings.Contains(val,"name=\"bucket\""){
-				bucketName=val[strings.Index(val,"name=\"bucket\"")+14:]
-				bucketName=strings.ReplaceAll(bucketName,"\n","")
-				bucketName=strings.ReplaceAll(bucketName,"\r","")
-				fmt.Println(bucketName)
-			} else if strings.Contains(val,"Content-Type:") {
-				re := regexp.MustCompile(`name="(.*?)"`)
-				match := re.FindStringSubmatch(val)
-				fileName = match[0]
-				val = val[strings.Index(val,"Content-Type:"):]
-				fileContent = val[strings.Index(val,"\n"):]
-				fileContent=strings.Replace(fileContent,"\n","",1)
-				fileContent=strings.Replace(fileContent,"\r","",1)
-				fileName = strings.ReplaceAll(fileName,"name=","")
-				fileName = strings.ReplaceAll(fileName,`"`,"")
+		for _, val := range split[1:] {
+			if strings.Contains(val, "name=\"bucket\"") {
+				bucketName = val[strings.Index(val, "name=\"bucket\"")+14:]
+				bucketName = strings.ReplaceAll(bucketName, "\n", "")
+				bucketName = strings.ReplaceAll(bucketName, "\r", "")
+			} else if strings.Contains(val, "Content-Type:") {
+				fileName = val[strings.Index(val, "name=\"")+6:]
+				fileName = fileName[:strings.Index(fileName, `;`)-1]
+				val = val[strings.Index(val, "Content-Type:"):]
+				fileContent = val[strings.Index(val, "\n"):]
+				fileContent = strings.TrimRight(fileContent, "\n")
+				fileContent = strings.TrimRight(fileContent, "\r")
+				fileContent = strings.TrimLeft(fileContent, "\n")
+				fileContent = strings.TrimLeft(fileContent, "\r")
 			}
 		}
-		params = make([]string,3)
-		params[0]="upload"
-		params[1]=bucketName
-		params[2]=fileName
-		fmt.Print("Here2")
-		os.Args = []string{"", "upload",bucketName, fileName}
-		fmt.Println(fileName)
-		fmt.Println(bucketName)
-		file, err := os.Create("/tmp/"+fileName)
+		params = make([]string, 3)
+		params[0] = "upload"
+		params[1] = bucketName
+		params[2] = fileName
+		os.Args = []string{"", "upload", bucketName, fileName}
+		file, err := os.Create("/tmp/" + fileName)
 		if err != nil {
 			fmt.Println(err.Error())
 			return events.APIGatewayProxyResponse{
@@ -105,7 +102,7 @@ func HandleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (ev
 		}, fmt.Errorf("Error")
 	}
 
-	if params[0]=="download" {
+	if params[0] == "download" {
 		resp := events.APIGatewayProxyResponse{
 			StatusCode: 200,
 			Body:       response,
@@ -113,8 +110,8 @@ func HandleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (ev
 		resp.Headers = make(map[string]string)
 		resp.Headers["Content-Type"] = "application/octet-stream"
 		resp.Headers["Content-Disposition"] = "attachment; filename=" + params[2]
-		resp.Headers["Access-Control-Allow-Origin"]="*"
-		resp.Headers["Access-Control-Expose-Headers"]="Content-Disposition"
+		resp.Headers["Access-Control-Allow-Origin"] = "*"
+		resp.Headers["Access-Control-Expose-Headers"] = "Content-Disposition"
 		return resp, nil
 	}
 
@@ -123,8 +120,8 @@ func HandleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (ev
 		Body:       response,
 	}
 	resp.Headers["Content-Type"] = "text/plain"
-	resp.Headers["Access-Control-Allow-Origin"]="*"
-	return resp,nil
+	resp.Headers["Access-Control-Allow-Origin"] = "*"
+	return resp, nil
 }
 
 type downloadCmd struct{}
@@ -240,6 +237,58 @@ func (*uploadCmd) Usage() string {
 
 func (*uploadCmd) SetFlags(_ *flag.FlagSet) {}
 
+/*func (*uploadCmd) Execute(ctx context.Context, f *flag.FlagSet, _ ...interface{}) (status subcommands.ExitStatus) {
+	fmt.Print("Uploading file")
+	if f.NArg() != 2 {
+		f.Usage()
+		return subcommands.ExitUsageError
+	}
+	bucketURL := f.Arg(0)
+	blobKey := f.Arg(1)
+	fmt.Println(bucketURL)
+	fmt.Println(blobKey)
+	// Open a *genericstorage.Bucket using the bucketURL.
+	bucket, err := genericstorage.OpenBucket(ctx, bucketURL)
+	if err != nil {
+		fmt.Printf("Failed to open bucket: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	defer bucket.Close()
+	fmt.Println("Opened Bucket")
+	file, err := os.Open("/tmp/"+blobKey)
+	if err != nil {
+		fmt.Printf("unable to open the file: %v", err)
+		status = subcommands.ExitFailure
+	}
+
+	// Open a *genericstorage.Writer for the genericstorage at blobKey.
+	writer, err := bucket.NewWriter(ctx, blobKey, nil)
+	if err != nil {
+		fmt.Printf("Failed to write %q: %v\n", blobKey, err)
+		return subcommands.ExitFailure
+	}
+	defer func() {
+		if err := writer.Close(); err != nil && status == subcommands.ExitSuccess {
+			fmt.Printf("closing the writer: %v", err)
+			status = subcommands.ExitSuccess
+		}
+	}()
+	// Copy the data.
+	_, err = io.Copy(writer, file)
+	if err != nil {
+		fmt.Printf("Failed to copy data: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	err = file.Close()
+	if err != nil {
+		fmt.Printf("Failed to close file: %v\n", err)
+		return subcommands.ExitSuccess
+	}
+	response = "Uploaded successfully to " + bucketURL
+	fmt.Println(response)
+	return subcommands.ExitSuccess
+}*/
+
 func (*uploadCmd) Execute(ctx context.Context, f *flag.FlagSet, _ ...interface{}) (status subcommands.ExitStatus) {
 	fmt.Print("Uploading file")
 	if f.NArg() != 2 {
@@ -269,7 +318,7 @@ func (*uploadCmd) Execute(ctx context.Context, f *flag.FlagSet, _ ...interface{}
 			status = subcommands.ExitFailure
 		}
 	}()
-	file, err := os.Open("/tmp/"+blobKey)
+	file, err := os.Open("/tmp/" + blobKey)
 	if err != nil {
 		fmt.Printf("unable to open the file: %v", err)
 		status = subcommands.ExitFailure
